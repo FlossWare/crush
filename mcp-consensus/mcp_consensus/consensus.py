@@ -51,6 +51,11 @@ async def call_model(
 WORKER_RETRIES = int(os.environ.get("WORKER_RETRIES", "2"))
 
 
+async def _call_with_semaphore(semaphore, coro):
+    async with semaphore:
+        return await coro
+
+
 async def call_worker(
     client: httpx.AsyncClient,
     model: str,
@@ -62,28 +67,24 @@ async def call_worker(
 ) -> WorkerResponse | FailedWorker:
     messages = build_worker_prompt(tool_name, user_prompt)
     start = time.monotonic()
-    async with semaphore:
-        last_error = None
-        for attempt in range(1 + WORKER_RETRIES):
-            try:
-                response = await asyncio.wait_for(
-                    call_model(client, model, messages, temperature),
-                    timeout=timeout_seconds,
-                )
-                latency = int((time.monotonic() - start) * 1000)
-                logger.info("Worker %s succeeded (%dms)", model, latency)
-                return WorkerResponse(model=model, response=response, latency_ms=latency)
-            except asyncio.TimeoutError:
-                logger.warning("Worker %s timed out after %ds", model, timeout_seconds)
-                return FailedWorker(model=model, error=f"Timeout after {timeout_seconds}s")
-            except Exception as e:
-                last_error = e
-                if attempt < WORKER_RETRIES:
-                    delay = 2 ** attempt
-                    logger.info("Worker %s attempt %d failed, retrying in %ds", model, attempt + 1, delay)
-                    await asyncio.sleep(delay)
-        logger.warning("Worker %s failed after %d attempts: %s", model, 1 + WORKER_RETRIES, last_error)
-        return FailedWorker(model=model, error=str(last_error))
+    last_error = None
+    for attempt in range(1 + WORKER_RETRIES):
+        try:
+            response = await asyncio.wait_for(
+                _call_with_semaphore(semaphore, call_model(client, model, messages, temperature)),
+                timeout=timeout_seconds,
+            )
+            latency = int((time.monotonic() - start) * 1000)
+            logger.info("Worker %s succeeded (%dms)", model, latency)
+            return WorkerResponse(model=model, response=response, latency_ms=latency)
+        except (asyncio.TimeoutError, Exception) as e:
+            last_error = e
+            if attempt < WORKER_RETRIES:
+                delay = 2 ** attempt
+                logger.info("Worker %s attempt %d failed (%s), retrying in %ds", model, attempt + 1, type(e).__name__, delay)
+                await asyncio.sleep(delay)
+    logger.warning("Worker %s failed after %d attempts: %s", model, 1 + WORKER_RETRIES, last_error)
+    return FailedWorker(model=model, error=str(last_error))
 
 
 async def query_available_models(client: httpx.AsyncClient) -> list[str]:

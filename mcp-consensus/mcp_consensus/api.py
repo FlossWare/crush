@@ -95,16 +95,24 @@ async def list_models():
 
 @app.post("/v1/consensus", response_model=ConsensusResponse)
 async def consensus(req: ConsensusAPIRequest):
-    inner = ConsensusRequest(
-        prompt=req.prompt,
-        worker_models=req.worker_models,
-        arbiter_model=req.arbiter_model,
-        temperature=req.temperature,
-        timeout_seconds=req.timeout_seconds,
-        dry_run=req.dry_run,
-    )
+    try:
+        inner = ConsensusRequest(
+            prompt=req.prompt,
+            worker_models=req.worker_models,
+            arbiter_model=req.arbiter_model,
+            temperature=req.temperature,
+            timeout_seconds=req.timeout_seconds,
+            dry_run=req.dry_run,
+        )
+    except Exception as e:
+        logger.warning("Invalid consensus request: %s", e)
+        raise HTTPException(status_code=422, detail="Invalid request parameters")
     tool_name = TOOL_MAP[req.tool.value]
-    result = await run_consensus(tool_name, inner)
+    try:
+        result = await run_consensus(tool_name, inner)
+    except Exception as e:
+        logger.error("Consensus failed: %s", e)
+        raise HTTPException(status_code=502, detail="Consensus execution failed")
     return result
 
 
