@@ -20,7 +20,7 @@ logger = logging.getLogger("mcp-consensus")
 LITELLM_URL = os.environ.get("LITELLM_URL", "http://localhost:4000")
 LITELLM_KEY = os.environ.get("LITELLM_MASTER_KEY", "")
 
-MAX_CONCURRENT_WORKERS = int(os.environ.get("MAX_CONCURRENT_WORKERS", "10"))
+MAX_CONCURRENT_WORKERS = min(int(os.environ.get("MAX_CONCURRENT_WORKERS", "10")), 50)
 
 
 async def call_model(
@@ -48,6 +48,9 @@ async def call_model(
     return data["choices"][0]["message"]["content"]
 
 
+WORKER_RETRIES = int(os.environ.get("WORKER_RETRIES", "2"))
+
+
 async def call_worker(
     client: httpx.AsyncClient,
     model: str,
@@ -60,20 +63,27 @@ async def call_worker(
     messages = build_worker_prompt(tool_name, user_prompt)
     start = time.monotonic()
     async with semaphore:
-        try:
-            response = await asyncio.wait_for(
-                call_model(client, model, messages, temperature),
-                timeout=timeout_seconds,
-            )
-            latency = int((time.monotonic() - start) * 1000)
-            logger.info("Worker %s succeeded (%dms)", model, latency)
-            return WorkerResponse(model=model, response=response, latency_ms=latency)
-        except asyncio.TimeoutError:
-            logger.warning("Worker %s timed out after %ds", model, timeout_seconds)
-            return FailedWorker(model=model, error=f"Timeout after {timeout_seconds}s")
-        except Exception as e:
-            logger.warning("Worker %s failed: %s", model, e)
-            return FailedWorker(model=model, error=str(e))
+        last_error = None
+        for attempt in range(1 + WORKER_RETRIES):
+            try:
+                response = await asyncio.wait_for(
+                    call_model(client, model, messages, temperature),
+                    timeout=timeout_seconds,
+                )
+                latency = int((time.monotonic() - start) * 1000)
+                logger.info("Worker %s succeeded (%dms)", model, latency)
+                return WorkerResponse(model=model, response=response, latency_ms=latency)
+            except asyncio.TimeoutError:
+                logger.warning("Worker %s timed out after %ds", model, timeout_seconds)
+                return FailedWorker(model=model, error=f"Timeout after {timeout_seconds}s")
+            except Exception as e:
+                last_error = e
+                if attempt < WORKER_RETRIES:
+                    delay = 2 ** attempt
+                    logger.info("Worker %s attempt %d failed, retrying in %ds", model, attempt + 1, delay)
+                    await asyncio.sleep(delay)
+        logger.warning("Worker %s failed after %d attempts: %s", model, 1 + WORKER_RETRIES, last_error)
+        return FailedWorker(model=model, error=str(last_error))
 
 
 async def query_available_models(client: httpx.AsyncClient) -> list[str]:
@@ -163,7 +173,7 @@ async def run_consensus(
 
         try:
             synthesis = await asyncio.wait_for(
-                call_model(client, arbiter, arbiter_messages, 0.3),
+                call_model(client, arbiter, arbiter_messages, request.temperature),
                 timeout=request.timeout_seconds,
             )
         except Exception as e:

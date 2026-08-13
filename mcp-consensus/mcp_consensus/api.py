@@ -81,7 +81,7 @@ async def list_models():
         headers = {}
         if LITELLM_KEY:
             headers["Authorization"] = f"Bearer {LITELLM_KEY}"
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout=10)) as client:
             resp = await client.get(
                 f"{LITELLM_URL}/v1/models", headers=headers,
             )

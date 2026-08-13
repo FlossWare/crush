@@ -69,8 +69,9 @@ async def handle_call_tool(req: CallToolRequest) -> CallToolResult:
     try:
         request = ConsensusRequest(**arguments)
     except Exception as e:
+        logger.warning("Invalid arguments for %s: %s", name, e)
         return CallToolResult(
-            content=[TextContent(type="text", text=f"Invalid arguments: {e}")]
+            content=[TextContent(type="text", text="Invalid arguments: check required fields (prompt is required)")]
         )
 
     logger.info(
