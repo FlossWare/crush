@@ -1,6 +1,10 @@
 # Crush
 
-Setup guides, scripts, and configuration for [Crush](https://github.com/charmbracelet/crush) (Charm's terminal coding agent).
+<p align="center">
+  <a href="https://github.com/charmbracelet/crush">
+    <img src="https://stuff.charm.sh/crush/charm-crush.png" alt="Crush" width="450">
+  </a>
+</p>
 
 ## Quick Start
 
