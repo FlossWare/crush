@@ -43,14 +43,22 @@ class ConsensusAPIRequest(BaseModel):
     prompt: str = Field(..., description="The task, question, or code to evaluate")
     worker_models: list[str] | None = Field(
         default=None,
-        description="Override default worker models. If not set, uses all available.",
+        description="Override default worker models. If not set, uses the configured fleet.",
     )
     arbiter_model: str | None = Field(
         default=None,
         description="Override default arbiter model.",
     )
     temperature: float = Field(default=0.3, ge=0.0, le=1.0)
+    arbiter_temperature: float | None = Field(
+        default=None, ge=0.0, le=1.0,
+        description="Arbiter synthesis temperature. Defaults to 0.3.",
+    )
     timeout_seconds: int = Field(default=60, ge=5, le=300)
+    arbiter_timeout_seconds: int | None = Field(
+        default=None, ge=5, le=600,
+        description="Arbiter timeout in seconds. Defaults to timeout_seconds.",
+    )
     dry_run: bool = Field(default=False)
 
 
@@ -101,7 +109,9 @@ async def consensus(req: ConsensusAPIRequest):
             worker_models=req.worker_models,
             arbiter_model=req.arbiter_model,
             temperature=req.temperature,
+            arbiter_temperature=req.arbiter_temperature,
             timeout_seconds=req.timeout_seconds,
+            arbiter_timeout_seconds=req.arbiter_timeout_seconds,
             dry_run=req.dry_run,
         )
     except Exception as e:
@@ -117,7 +127,7 @@ async def consensus(req: ConsensusAPIRequest):
 
 
 def main():
-    host = os.environ.get("API_HOST", "0.0.0.0")
+    host = os.environ.get("API_HOST", "127.0.0.1")
     port = int(os.environ.get("API_PORT", "8080"))
     uvicorn.run(app, host=host, port=port)
 

@@ -5,14 +5,7 @@ import sys
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import (
-    CallToolRequest,
-    CallToolResult,
-    ListToolsRequest,
-    ListToolsResult,
-    TextContent,
-    Tool,
-)
+from mcp.types import TextContent, Tool
 
 from .consensus import run_consensus
 from .models import ConsensusRequest
@@ -26,7 +19,7 @@ TOOLS = [
     Tool(
         name="multi_ai_design",
         description=(
-            "Get multi-model consensus on architecture and design decisions. "
+            "Get multi-model AI analysis on architecture and design decisions. "
             "Fans out to N free AI models in parallel, then an arbiter synthesizes the results."
         ),
         inputSchema=INPUT_SCHEMA,
@@ -34,7 +27,7 @@ TOOLS = [
     Tool(
         name="multi_ai_review",
         description=(
-            "Get multi-model code review consensus. "
+            "Get multi-model code review analysis. "
             "Each model independently reviews the code, then an arbiter synthesizes findings."
         ),
         inputSchema=INPUT_SCHEMA,
@@ -49,36 +42,32 @@ TOOLS = [
     ),
 ]
 
+VALID_TOOLS = {t.name for t in TOOLS}
+
 app = Server("mcp-consensus")
 
 
-async def handle_list_tools(req: ListToolsRequest) -> ListToolsResult:
-    return ListToolsResult(tools=TOOLS)
+@app.list_tools()
+async def handle_list_tools() -> list[Tool]:
+    return TOOLS
 
 
-async def handle_call_tool(req: CallToolRequest) -> CallToolResult:
-    params = req.params
-    name = params.name
-    arguments = params.arguments or {}
-
-    if name not in ("multi_ai_design", "multi_ai_review", "multi_ai_implement"):
-        return CallToolResult(
-            content=[TextContent(type="text", text=f"Unknown tool: {name}")]
-        )
+@app.call_tool()
+async def handle_call_tool(name: str, arguments: dict) -> list[TextContent]:
+    if name not in VALID_TOOLS:
+        return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
     try:
         request = ConsensusRequest(**arguments)
     except Exception as e:
         logger.warning("Invalid arguments for %s: %s", name, e)
-        return CallToolResult(
-            content=[TextContent(type="text", text="Invalid arguments: check required fields (prompt is required)")]
-        )
+        return [TextContent(type="text", text="Invalid arguments: check required fields (prompt is required)")]
 
     logger.info(
         "Tool=%s workers=%s arbiter=%s dry_run=%s",
         name,
-        request.worker_models or "auto",
-        request.arbiter_model or "auto",
+        request.worker_models or "fleet-default",
+        request.arbiter_model or "default",
         request.dry_run,
     )
 
@@ -100,13 +89,7 @@ async def handle_call_tool(req: CallToolRequest) -> CallToolResult:
             for wr in result.raw_worker_responses
         ]
 
-    return CallToolResult(
-        content=[TextContent(type="text", text=json.dumps(output, indent=2))]
-    )
-
-
-app.add_request_handler("tools/list", ListToolsRequest, handle_list_tools)
-app.add_request_handler("tools/call", CallToolRequest, handle_call_tool)
+    return [TextContent(type="text", text=json.dumps(output, indent=2))]
 
 
 async def main():

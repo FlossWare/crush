@@ -15,6 +15,13 @@ dependencies = [
     "uvicorn>=0.30.0",
 ]
 
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "respx>=0.22.0",
+]
+
 [project.scripts]
 mcp-consensus = "mcp_consensus.server:entry"
 mcp-consensus-api = "mcp_consensus.api:main"

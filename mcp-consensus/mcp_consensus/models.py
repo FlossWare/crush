@@ -16,7 +16,11 @@ class ConsensusRequest(BaseModel):
     prompt: str = Field(..., description="The task, question, or code to evaluate")
     worker_models: list[str] | None = Field(
         default=None,
-        description="Override default worker models. If not set, uses all available models.",
+        description=(
+            "Override default worker models. If not set, uses the configured fleet "
+            "(WORKER_FLEET env var or DEFAULT_WORKERS). Pass explicit list to control "
+            "which models participate."
+        ),
     )
     arbiter_model: str | None = Field(
         default=None,
@@ -26,7 +30,13 @@ class ConsensusRequest(BaseModel):
         default=0.3,
         ge=0.0,
         le=1.0,
-        description="Temperature for worker responses.",
+        description="Temperature for worker model responses.",
+    )
+    arbiter_temperature: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Temperature for the arbiter synthesis. Defaults to 0.3 if not set.",
     )
     timeout_seconds: int = Field(
         default=60,
@@ -34,9 +44,15 @@ class ConsensusRequest(BaseModel):
         le=300,
         description="Per-worker timeout in seconds.",
     )
+    arbiter_timeout_seconds: int | None = Field(
+        default=None,
+        ge=5,
+        le=600,
+        description="Arbiter timeout in seconds. Defaults to timeout_seconds if not set.",
+    )
     dry_run: bool = Field(
         default=False,
-        description="Return constructed prompts without calling any models.",
+        description="Return constructed prompts without calling any models. Makes zero network calls.",
     )
 
 
