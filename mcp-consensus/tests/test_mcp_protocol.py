@@ -1,36 +1,34 @@
 """MCP protocol integration tests.
 
-Exercises the server through the actual MCP SDK types:
-  ListToolsRequest → ListToolsResult
-  CallToolRequest → CallToolResult
+Exercises the server through the MCP SDK v2 handler API:
+  on_list_tools(ctx, params) -> ListToolsResult
+  on_call_tool(ctx, params) -> CallToolResult
 """
 
 import json
+from unittest.mock import MagicMock
 
 import pytest
 import respx
 
 from mcp.types import (
-    CallToolRequest,
     CallToolRequestParams,
     CallToolResult,
-    ListToolsRequest,
     ListToolsResult,
-    TextContent,
+    PaginatedRequestParams,
 )
 
-from mcp_consensus.server import app
+from mcp_consensus.server import (
+    TOOLS,
+    VALID_TOOLS,
+    _handle_call_tool,
+    _handle_list_tools,
+    app,
+)
 
 
-def _list_tools_request():
-    return ListToolsRequest(method="tools/list")
-
-
-def _call_tool_request(name: str, arguments: dict):
-    return CallToolRequest(
-        method="tools/call",
-        params=CallToolRequestParams(name=name, arguments=arguments),
-    )
+def _ctx():
+    return MagicMock(name="ServerRequestContext")
 
 
 @pytest.mark.asyncio
@@ -42,10 +40,7 @@ class TestMCPProtocol:
 
     async def test_list_tools(self):
         """tools/list returns all three tools with valid schemas."""
-        handler = app.get_request_handler("tools/list")
-        assert handler is not None
-
-        result = await handler.handler(_list_tools_request())
+        result = await _handle_list_tools(_ctx(), None)
         assert isinstance(result, ListToolsResult)
         assert len(result.tools) == 3
 
@@ -58,14 +53,18 @@ class TestMCPProtocol:
             assert "prompt" in schema.get("properties", {})
             assert "prompt" in schema.get("required", [])
 
+    async def test_list_tools_with_pagination_params(self):
+        result = await _handle_list_tools(_ctx(), PaginatedRequestParams())
+        assert len(result.tools) == 3
+
     @respx.mock
     async def test_call_tool_dry_run(self):
         """tools/call with dry_run=True returns prompts, makes no network calls."""
-        handler = app.get_request_handler("tools/call")
-
-        result = await handler.handler(
-            _call_tool_request("multi_ai_design", {"prompt": "test", "dry_run": True})
+        params = CallToolRequestParams(
+            name="multi_ai_design",
+            arguments={"prompt": "test", "dry_run": True},
         )
+        result = await _handle_call_tool(_ctx(), params)
         assert isinstance(result, CallToolResult)
         assert not result.is_error
 
@@ -76,7 +75,6 @@ class TestMCPProtocol:
     @respx.mock
     async def test_call_tool_live(self):
         """tools/call with mocked workers completes successfully."""
-        handler = app.get_request_handler("tools/call")
         call_count = 0
 
         def route_handler(request):
@@ -91,12 +89,11 @@ class TestMCPProtocol:
             side_effect=route_handler
         )
 
-        result = await handler.handler(
-            _call_tool_request(
-                "multi_ai_review",
-                {"prompt": "Review this", "worker_models": ["test-model"]},
-            )
+        params = CallToolRequestParams(
+            name="multi_ai_review",
+            arguments={"prompt": "Review this", "worker_models": ["test-model"]},
         )
+        result = await _handle_call_tool(_ctx(), params)
         assert isinstance(result, CallToolResult)
         assert not result.is_error
 
@@ -105,20 +102,16 @@ class TestMCPProtocol:
 
     async def test_call_tool_unknown(self):
         """tools/call with unknown tool name returns an error result."""
-        handler = app.get_request_handler("tools/call")
-        result = await handler.handler(
-            _call_tool_request("nonexistent", {"prompt": "test"})
-        )
+        params = CallToolRequestParams(name="nonexistent", arguments={"prompt": "test"})
+        result = await _handle_call_tool(_ctx(), params)
         assert isinstance(result, CallToolResult)
         assert result.is_error
         assert "Unknown tool" in result.content[0].text
 
     async def test_call_tool_missing_prompt(self):
         """tools/call without required 'prompt' returns an error result."""
-        handler = app.get_request_handler("tools/call")
-        result = await handler.handler(
-            _call_tool_request("multi_ai_design", {})
-        )
+        params = CallToolRequestParams(name="multi_ai_design", arguments={})
+        result = await _handle_call_tool(_ctx(), params)
         assert isinstance(result, CallToolResult)
         assert result.is_error
         assert "Invalid arguments" in result.content[0].text
@@ -126,12 +119,12 @@ class TestMCPProtocol:
     @respx.mock
     async def test_each_tool_invocable(self):
         """All three tools can be called via the protocol (dry-run)."""
-        handler = app.get_request_handler("tools/call")
-
         for tool_name in ["multi_ai_design", "multi_ai_review", "multi_ai_implement"]:
-            result = await handler.handler(
-                _call_tool_request(tool_name, {"prompt": f"Test {tool_name}", "dry_run": True})
+            params = CallToolRequestParams(
+                name=tool_name,
+                arguments={"prompt": f"Test {tool_name}", "dry_run": True},
             )
+            result = await _handle_call_tool(_ctx(), params)
             assert not result.is_error
             output = json.loads(result.content[0].text)
             assert "DRY RUN" in output["synthesized_response"]
@@ -140,7 +133,9 @@ class TestMCPProtocol:
         """Each tool name has a corresponding worker prompt defined."""
         from mcp_consensus.prompts import WORKER_PROMPTS
 
-        handler = app.get_request_handler("tools/list")
-        result = await handler.handler(_list_tools_request())
+        result = await _handle_list_tools(_ctx(), None)
         for tool in result.tools:
             assert tool.name in WORKER_PROMPTS, f"No worker prompt for {tool.name}"
+
+    def test_tools_and_valid_set_aligned(self):
+        assert VALID_TOOLS == {t.name for t in TOOLS}
