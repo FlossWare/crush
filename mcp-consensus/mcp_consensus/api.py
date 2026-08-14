@@ -73,7 +73,7 @@ class ConsensusAPIRequest(BaseModel):
     dry_run: bool = Field(default=False)
 
 
-async def require_api_key(
+def require_api_key(
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),
     authorization: str | None = Header(default=None),
 ) -> None:
@@ -115,7 +115,11 @@ async def health():
     }
 
 
-@app.get("/v1/models", dependencies=[Depends(require_api_key)])
+@app.get(
+    "/v1/models",
+    dependencies=[Depends(require_api_key)],
+    responses={502: {"description": "LiteLLM unavailable"}},
+)
 async def list_models():
     try:
         headers = {}
@@ -128,10 +132,9 @@ async def list_models():
             )
             resp.raise_for_status()
             data = resp.json()
-            models = sorted(set(m["id"] for m in data.get("data", [])))
+            models = sorted({m["id"] for m in data.get("data", [])})
             return {"models": models, "count": len(models)}
     except Exception as e:
-        # Log detail server-side; do not leak exception text to clients.
         logger.warning("LiteLLM /v1/models failed: %s", e)
         raise HTTPException(status_code=502, detail="LiteLLM unavailable")
 
@@ -140,6 +143,10 @@ async def list_models():
     "/v1/consensus",
     response_model=ConsensusResponse,
     dependencies=[Depends(require_api_key)],
+    responses={
+        422: {"description": "Invalid request parameters or empty worker fleet"},
+        502: {"description": "Consensus execution failed"},
+    },
 )
 async def consensus(req: ConsensusAPIRequest):
     try:
@@ -153,17 +160,16 @@ async def consensus(req: ConsensusAPIRequest):
             arbiter_timeout_seconds=req.arbiter_timeout_seconds,
             dry_run=req.dry_run,
         )
-    except Exception as e:
-        logger.warning("Invalid consensus request: %s", e)
+    except Exception:
+        logger.exception("Invalid consensus request")
         raise HTTPException(status_code=422, detail="Invalid request parameters")
     tool_name = TOOL_MAP[req.tool.value]
     try:
         result = await run_consensus(tool_name, inner)
     except ValueError as e:
-        # ValueError messages are intentional client-facing config errors.
         raise HTTPException(status_code=422, detail=str(e))
-    except Exception as e:
-        logger.error("Consensus failed: %s", e)
+    except Exception:
+        logger.exception("Consensus execution failed")
         raise HTTPException(status_code=502, detail="Consensus execution failed")
     return result
 

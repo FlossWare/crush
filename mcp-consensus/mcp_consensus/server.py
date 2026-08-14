@@ -59,7 +59,7 @@ TOOLS = [
 VALID_TOOLS = {t.name for t in TOOLS}
 
 
-async def _handle_list_tools(
+async def _handle_list_tools(  # noqa: S1172 - async required by MCP handler contract
     ctx: ServerRequestContext,
     params: PaginatedRequestParams | None,
 ) -> ListToolsResult:

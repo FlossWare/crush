@@ -96,6 +96,33 @@ def _is_retryable(exc: Exception) -> bool:
     return False
 
 
+def _remaining_before_deadline(deadline: float) -> float:
+    return deadline - time.monotonic()
+
+
+def _retry_delay(attempt: int, deadline: float) -> float:
+    jittered = (2 ** attempt) + random.uniform(0, 1)
+    return min(jittered, max(0, _remaining_before_deadline(deadline)))
+
+
+async def _attempt_worker_call(
+    client: httpx.AsyncClient,
+    model: str,
+    messages: list[dict],
+    temperature: float,
+    deadline: float,
+    semaphore: asyncio.Semaphore,
+) -> str:
+    async with semaphore:
+        remaining = _remaining_before_deadline(deadline)
+        if remaining <= 0:
+            raise asyncio.TimeoutError()
+        return await asyncio.wait_for(
+            call_model(client, model, messages, temperature),
+            timeout=remaining,
+        )
+
+
 async def call_worker(
     client: httpx.AsyncClient,
     model: str,
@@ -108,22 +135,17 @@ async def call_worker(
     messages = build_worker_prompt(tool_name, user_prompt)
     start = time.monotonic()
     deadline = start + timeout_seconds
-    last_error = None
+    last_error: Exception | None = None
+
     for attempt in range(1 + WORKER_RETRIES):
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
+        if _remaining_before_deadline(deadline) <= 0:
             last_error = last_error or asyncio.TimeoutError()
             break
         try:
-            async with semaphore:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise asyncio.TimeoutError()
-                call_start = time.monotonic()
-                response = await asyncio.wait_for(
-                    call_model(client, model, messages, temperature),
-                    timeout=remaining,
-                )
+            call_start = time.monotonic()
+            response = await _attempt_worker_call(
+                client, model, messages, temperature, deadline, semaphore,
+            )
             latency = int((time.monotonic() - call_start) * 1000)
             logger.info("Worker %s succeeded (%dms)", model, latency)
             return WorkerResponse(model=model, response=response, latency_ms=latency)
@@ -132,24 +154,15 @@ async def call_worker(
             if not _is_retryable(e):
                 logger.warning("Worker %s failed with non-retryable error: %s", model, e)
                 return FailedWorker(model=model, error=_client_safe_error(e))
-            if attempt < WORKER_RETRIES:
-                delay = min(
-                    (2 ** attempt) + random.uniform(0, 1),
-                    max(0, deadline - time.monotonic()),
-                )
-                if delay <= 0:
-                    break
+            delay = _retry_delay(attempt, deadline)
+            if attempt < WORKER_RETRIES and delay > 0:
                 logger.info(
                     "Worker %s attempt %d failed (%s), retrying in %.1fs",
                     model, attempt + 1, type(e).__name__, delay,
                 )
                 await asyncio.sleep(delay)
-    logger.warning(
-        "Worker %s failed after %d attempts: %s",
-        model,
-        1 + WORKER_RETRIES,
-        last_error,
-    )
+
+    logger.warning("Worker %s failed after %d attempts: %s", model, 1 + WORKER_RETRIES, last_error)
     return FailedWorker(
         model=model,
         error=_client_safe_error(last_error) if last_error else "UnknownError",
@@ -242,7 +255,6 @@ async def run_consensus(
             )
 
         arbiter_messages = build_arbiter_prompt(
-            tool_name,
             request.prompt,
             [{"model": w.model, "response": w.response} for w in successful],
         )

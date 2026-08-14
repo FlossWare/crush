@@ -39,7 +39,6 @@ def build_worker_prompt(tool_name: str, user_prompt: str) -> list[dict]:
 
 
 def build_arbiter_prompt(
-    tool_name: str,
     user_prompt: str,
     worker_responses: list[dict],
 ) -> list[dict]:
