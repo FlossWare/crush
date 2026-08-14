@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcp-consensus"
+version = "0.1.0"
+description = "MCP server for multi-model AI consensus (arbiter/worker pattern)"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp>=2.0.0,<3",
+    "httpx>=0.27.0",
+    "pydantic>=2.0.0",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.30.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "respx>=0.22.0",
+]
+
+[project.scripts]
+mcp-consensus = "mcp_consensus.server:entry"
+mcp-consensus-api = "mcp_consensus.api:main"
+
+[tool.setuptools.packages.find]
+include = ["mcp_consensus*"]
