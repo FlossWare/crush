@@ -48,7 +48,7 @@ Both transports share the same consensus engine (`consensus.py`).
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `prompt` | string | *(required)* | The question, code, or task |
+| `prompt` | string | *(required)* | The question, code, or task (max 100,000 characters) |
 | `worker_models` | string[] | configured fleet | Override which models to query. `null` uses the configured fleet. An empty list is invalid and returns an error (including in dry-run). |
 | `arbiter_model` | string | gemini-3.5-flash | Override the synthesis model |
 | `temperature` | float | 0.3 | Worker model temperature (0.0–1.0) |
@@ -112,15 +112,33 @@ python -m mcp_consensus.api
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/health` | Health check (verifies LiteLLM connectivity) |
+| GET | `/health` | Health check (verifies LiteLLM connectivity). Always unauthenticated. |
 | GET | `/v1/models` | List available models from LiteLLM |
 | POST | `/v1/consensus` | Run a consensus call |
+
+### Authentication
+
+By default the REST API binds to `127.0.0.1` and does not require a key (convenient for local use).
+
+Set `API_KEY` to require authentication on `/v1/*`:
+
+```bash
+export API_KEY="change-me"
+```
+
+Clients must send either:
+
+- `X-API-Key: <key>`, or
+- `Authorization: Bearer <key>`
+
+`/health` stays open for probes and reports `auth_required: true|false`.
 
 ### Example
 
 ```bash
 curl -X POST http://localhost:8080/v1/consensus \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: change-me" \
   -d '{
     "tool": "review",
     "prompt": "Review this function for bugs...",
@@ -144,6 +162,7 @@ The REST API binds to `127.0.0.1:8080` by default. Set `API_HOST` and `API_PORT`
 | `WORKER_RETRIES` | `2` | Retry count for transient worker failures (0–10) |
 | `API_HOST` | `127.0.0.1` | REST API bind address |
 | `API_PORT` | `8080` | REST API port (1–65535) |
+| `API_KEY` | *(empty)* | Optional REST shared secret; when set, `/v1/*` requires `X-API-Key` or Bearer |
 
 Invalid values for `MAX_CONCURRENT_WORKERS`, `WORKER_RETRIES`, or `API_PORT` produce a clear configuration error at startup.
 
@@ -154,7 +173,7 @@ pip install -e ".[test]"
 pytest tests/ -v
 ```
 
-Tests cover: dry-run, explicit/default worker selection, worker timeout, individual/partial/all-worker failure, arbiter failure fallback (concatenated workers in `synthesized_response`), concurrency limits, MCP tool registration, MCP protocol smoke path, REST API endpoints, retry logic, and timeout semantics.
+Tests cover: dry-run, explicit/default worker selection, worker timeout, individual/partial/all-worker failure, arbiter failure fallback (concatenated workers in `synthesized_response`), concurrency limits, MCP tool registration, MCP protocol smoke path, REST API endpoints (including optional API key auth), retry logic, and timeout semantics.
 
 ## Requirements
 
@@ -164,8 +183,9 @@ Tests cover: dry-run, explicit/default worker selection, worker timeout, individ
 
 ## Error Handling
 
-- **Worker failures** are isolated — a failing worker doesn't affect others. Failed workers are reported in the response alongside successful ones.
+- **Worker failures** are isolated — a failing worker doesn't affect others. Failed workers are reported with a **sanitized** error token (exception type / HTTP status), not raw exception messages. Full details are logged server-side only.
 - **Transient errors** (5xx, timeouts, connection errors) are retried with exponential backoff within the total worker deadline. Client errors (4xx) fail immediately without retry.
-- **Arbiter failure** sets `arbiter_failed=true` and puts a **concatenated dump of successful worker responses** into `synthesized_response` (prefixed with a short failure note), so MCP clients that only read the main text still get usable output. Structured `raw_worker_responses` remains available as well.
+- **Arbiter failure** sets `arbiter_failed=true` and puts a **concatenated dump of successful worker responses** into `synthesized_response` (prefixed with a short failure note using the exception type name only).
 - **Empty worker fleet** (`worker_models: []` or no configured fleet) is always an error, including dry-run.
-- **All-workers-fail** returns a descriptive error with per-worker failure details.
+- **All-workers-fail** returns a descriptive error with per-worker sanitized failure tokens.
+- **REST errors** toward clients use fixed messages (e.g. `LiteLLM unavailable`); upstream exception text is not returned in HTTP bodies.
