@@ -1,30 +1,48 @@
 """End-to-end MCP protocol smoke tests.
 
-Exercises initialize → tools/list → tools/call through the MCP client/server
-boundary (in-process when supported; otherwise handler-level protocol path).
+Proves initialize → tools/list → tools/call across the real MCP boundary:
+client JSON-RPC ↔ stdio transport ↔ server process.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import sys
 
 import pytest
 
 
+def _server_env() -> dict[str, str]:
+    """Inherit the test environment so the editable install is visible."""
+    env = os.environ.copy()
+    # Keep PATH so the same interpreter resolves; do not force LITELLM calls.
+    env.setdefault("PYTHONUNBUFFERED", "1")
+    return env
+
+
 @pytest.mark.asyncio
-async def test_mcp_inprocess_initialize_list_call_dry_run():
-    """Prefer the SDK in-process Client(server) path when available."""
-    from mcp_consensus.server import app
+async def test_mcp_stdio_initialize_list_call_dry_run():
+    """Genuine protocol path: spawn server over stdio, handshake, list, call.
 
-    try:
-        from mcp import Client
-    except ImportError:
-        pytest.skip("mcp.Client not available in this SDK build")
+    This is the non-skippable confidence check for MCP SDK compatibility.
+    """
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
 
-    try:
-        async with Client(app) as client:
-            tools_result = await client.list_tools()
-            tools = getattr(tools_result, "tools", tools_result)
+    server_params = StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "mcp_consensus"],
+        env=_server_env(),
+    )
+
+    async with stdio_client(server_params) as (read, write):
+        async with ClientSession(read, write) as session:
+            init = await session.initialize()
+            assert init is not None
+
+            tools_result = await session.list_tools()
+            tools = tools_result.tools
             names = {t.name for t in tools}
             assert names == {
                 "multi_ai_design",
@@ -32,32 +50,64 @@ async def test_mcp_inprocess_initialize_list_call_dry_run():
                 "multi_ai_implement",
             }
 
-            result = await client.call_tool(
+            # Schemas must advertise the required prompt field
+            for tool in tools:
+                schema = getattr(tool, "input_schema", None) or getattr(
+                    tool, "inputSchema", None
+                )
+                assert schema is not None
+                props = schema.get("properties", {})
+                required = schema.get("required", [])
+                assert "prompt" in props
+                assert "prompt" in required
+
+            result = await session.call_tool(
                 "multi_ai_design",
-                {"prompt": "smoke test", "dry_run": True},
+                arguments={"prompt": "stdio smoke test", "dry_run": True},
             )
+
             is_error = getattr(result, "is_error", None)
             if is_error is None:
                 is_error = getattr(result, "isError", False)
             assert not is_error
+            assert result.content, "expected non-empty tool content"
 
             text = result.content[0].text
             payload = json.loads(text)
             assert "DRY RUN" in payload["synthesized_response"]
             assert payload["consensus_metadata"]["execution_time_ms"] == 0
-    except TypeError as e:
-        # Low-level Server may not be accepted by Client() in some builds.
-        pytest.skip(f"In-process Client(app) not supported: {e}")
-    except Exception as e:
-        # Surface unexpected protocol failures rather than silently passing.
-        if "not supported" in str(e).lower() or "transport" in str(e).lower():
-            pytest.skip(f"In-process transport unavailable: {e}")
-        raise
+            assert "stdio smoke test" in payload["synthesized_response"]
 
 
 @pytest.mark.asyncio
-async def test_mcp_protocol_handlers_initialize_list_call():
-    """Always-available protocol path: registered handlers + init options."""
+async def test_mcp_stdio_unknown_tool_is_error():
+    """Protocol path returns is_error for unknown tool names."""
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+
+    server_params = StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "mcp_consensus"],
+        env=_server_env(),
+    )
+
+    async with stdio_client(server_params) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            result = await session.call_tool(
+                "not_a_real_tool",
+                arguments={"prompt": "x"},
+            )
+            is_error = getattr(result, "is_error", None)
+            if is_error is None:
+                is_error = getattr(result, "isError", False)
+            assert is_error
+            assert "Unknown tool" in result.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_mcp_protocol_handlers_list_and_call():
+    """Fast unit path: registered handlers + init options (not a protocol E2E)."""
     from unittest.mock import MagicMock
 
     from mcp.types import CallToolRequestParams
@@ -79,7 +129,7 @@ async def test_mcp_protocol_handlers_initialize_list_call():
         ctx,
         CallToolRequestParams(
             name="multi_ai_review",
-            arguments={"prompt": "protocol smoke", "dry_run": True},
+            arguments={"prompt": "handler smoke", "dry_run": True},
         ),
     )
     assert not call.is_error
