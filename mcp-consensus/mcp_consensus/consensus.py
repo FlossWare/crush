@@ -129,7 +129,12 @@ async def call_worker(
                     model, attempt + 1, type(e).__name__, delay,
                 )
                 await asyncio.sleep(delay)
-    logger.warning("Worker %s failed after %d attempts: %s", model, 1 + WORKER_RETRIES, last_error)
+    logger.warning(
+        "Worker %s failed after %d attempts: %s",
+        model,
+        1 + WORKER_RETRIES,
+        last_error,
+    )
     return FailedWorker(model=model, error=str(last_error))
 
 
@@ -137,6 +142,19 @@ def _resolve_workers(request: ConsensusRequest) -> list[str]:
     if request.worker_models is not None:
         return request.worker_models
     return list(CONFIGURED_WORKERS)
+
+
+def _concat_worker_responses(successful: list[WorkerResponse]) -> str:
+    """Concatenate successful worker outputs for degraded arbiter fallback."""
+    parts: list[str] = []
+    for i, w in enumerate(successful, 1):
+        parts.append(
+            f"{'=' * 60}\n"
+            f"MODEL {i}: {w.model}\n"
+            f"{'=' * 60}\n"
+            f"{w.response}\n"
+        )
+    return "".join(parts).rstrip()
 
 
 async def run_consensus(
@@ -147,11 +165,19 @@ async def run_consensus(
     workers = _resolve_workers(request)
     arbiter = request.arbiter_model or os.environ.get("DEFAULT_ARBITER", DEFAULT_ARBITER)
 
+    # Empty fleet is always invalid — including dry-run — so clients get a
+    # consistent error rather than a dry-run report of zero workers.
+    if not workers:
+        raise ValueError(
+            "No worker models configured. Set WORKER_FLEET env var or pass worker_models."
+        )
+
     if request.dry_run:
         from .prompts import WORKER_PROMPTS, ARBITER_SYSTEM_PROMPT
+
         dry_response = (
             f"DRY RUN — no API calls made.\n\n"
-            f"Workers ({len(workers)}): {', '.join(workers) if workers else '(empty)'}\n"
+            f"Workers ({len(workers)}): {', '.join(workers)}\n"
             f"Arbiter: {arbiter}\n\n"
             f"Worker system prompt:\n{WORKER_PROMPTS.get(tool_name, 'N/A')}\n\n"
             f"Arbiter system prompt:\n{ARBITER_SYSTEM_PROMPT.format(worker_count=len(workers))}\n\n"
@@ -166,16 +192,18 @@ async def run_consensus(
             raw_worker_responses=[],
         )
 
-    if not workers:
-        raise ValueError("No worker models configured. Set WORKER_FLEET env var or pass worker_models.")
-
     async with httpx.AsyncClient(timeout=httpx.Timeout(timeout=600)) as client:
         semaphore = asyncio.Semaphore(MAX_CONCURRENT_WORKERS)
 
         tasks = [
             call_worker(
-                client, model, tool_name, request.prompt,
-                request.temperature, request.timeout_seconds, semaphore,
+                client,
+                model,
+                tool_name,
+                request.prompt,
+                request.temperature,
+                request.timeout_seconds,
+                semaphore,
             )
             for model in workers
         ]
@@ -187,7 +215,9 @@ async def run_consensus(
         if not successful:
             error_details = "; ".join(f"{f.model}: {f.error}" for f in failed)
             return ConsensusResponse(
-                synthesized_response=f"All {len(workers)} workers failed. Errors: {error_details}",
+                synthesized_response=(
+                    f"All {len(workers)} workers failed. Errors: {error_details}"
+                ),
                 arbiter_model=arbiter,
                 execution_time_ms=int((time.monotonic() - start) * 1000),
                 successful_workers=[],
@@ -201,7 +231,11 @@ async def run_consensus(
             [{"model": w.model, "response": w.response} for w in successful],
         )
 
-        arbiter_temp = request.arbiter_temperature if request.arbiter_temperature is not None else 0.3
+        arbiter_temp = (
+            request.arbiter_temperature
+            if request.arbiter_temperature is not None
+            else 0.3
+        )
         arbiter_timeout = request.arbiter_timeout_seconds or request.timeout_seconds
 
         arbiter_error = False
@@ -211,8 +245,16 @@ async def run_consensus(
                 timeout=arbiter_timeout,
             )
         except Exception as e:
+            # Documented contract: fall back to concatenated raw worker output
+            # so MCP clients that only read synthesized_response still get value.
             arbiter_error = True
-            synthesis = f"Arbiter ({arbiter}) failed: {e}"
+            concatenated = _concat_worker_responses(successful)
+            synthesis = (
+                f"Arbiter ({arbiter}) failed: {e}\n\n"
+                f"Falling back to concatenated worker responses:\n\n"
+                f"{concatenated}"
+            )
+            logger.warning("Arbiter %s failed; returning concatenated workers: %s", arbiter, e)
 
     return ConsensusResponse(
         synthesized_response=synthesis,
