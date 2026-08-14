@@ -49,7 +49,7 @@ Both transports share the same consensus engine (`consensus.py`).
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `prompt` | string | *(required)* | The question, code, or task |
-| `worker_models` | string[] | configured fleet | Override which models to query. `null` uses the configured fleet. |
+| `worker_models` | string[] | configured fleet | Override which models to query. `null` uses the configured fleet. An empty list is invalid and returns an error (including in dry-run). |
 | `arbiter_model` | string | gemini-3.5-flash | Override the synthesis model |
 | `temperature` | float | 0.3 | Worker model temperature (0.0–1.0) |
 | `arbiter_temperature` | float | 0.3 | Arbiter synthesis temperature (0.0–1.0). Independent of worker temperature. |
@@ -130,7 +130,7 @@ curl -X POST http://localhost:8080/v1/consensus \
   }'
 ```
 
-The REST API binds to `127.0.0.1:8080` by default. Set `API_HOST` and `API_PORT` to change this.
+The REST API binds to `127.0.0.1:8080` by default. Set `API_HOST` and `API_PORT` to change this. Invalid `API_PORT` values produce a clear configuration error at startup.
 
 ## Environment Variables
 
@@ -143,9 +143,9 @@ The REST API binds to `127.0.0.1:8080` by default. Set `API_HOST` and `API_PORT`
 | `MAX_CONCURRENT_WORKERS` | `10` | Max parallel worker calls (1–50) |
 | `WORKER_RETRIES` | `2` | Retry count for transient worker failures (0–10) |
 | `API_HOST` | `127.0.0.1` | REST API bind address |
-| `API_PORT` | `8080` | REST API port |
+| `API_PORT` | `8080` | REST API port (1–65535) |
 
-Invalid values for `MAX_CONCURRENT_WORKERS` or `WORKER_RETRIES` produce a clear configuration error at startup.
+Invalid values for `MAX_CONCURRENT_WORKERS`, `WORKER_RETRIES`, or `API_PORT` produce a clear configuration error at startup.
 
 ## Testing
 
@@ -154,7 +154,7 @@ pip install -e ".[test]"
 pytest tests/ -v
 ```
 
-Tests cover: dry-run, explicit/default worker selection, worker timeout, individual/partial/all-worker failure, arbiter failure fallback, concurrency limits, MCP tool registration, REST API endpoints, retry logic, and timeout semantics.
+Tests cover: dry-run, explicit/default worker selection, worker timeout, individual/partial/all-worker failure, arbiter failure fallback (concatenated workers in `synthesized_response`), concurrency limits, MCP tool registration, MCP protocol smoke path, REST API endpoints, retry logic, and timeout semantics.
 
 ## Requirements
 
@@ -166,5 +166,6 @@ Tests cover: dry-run, explicit/default worker selection, worker timeout, individ
 
 - **Worker failures** are isolated — a failing worker doesn't affect others. Failed workers are reported in the response alongside successful ones.
 - **Transient errors** (5xx, timeouts, connection errors) are retried with exponential backoff within the total worker deadline. Client errors (4xx) fail immediately without retry.
-- **Arbiter failure** falls back to returning raw worker responses concatenated, so worker output is never lost.
+- **Arbiter failure** sets `arbiter_failed=true` and puts a **concatenated dump of successful worker responses** into `synthesized_response` (prefixed with a short failure note), so MCP clients that only read the main text still get usable output. Structured `raw_worker_responses` remains available as well.
+- **Empty worker fleet** (`worker_models: []` or no configured fleet) is always an error, including dry-run.
 - **All-workers-fail** returns a descriptive error with per-worker failure details.
