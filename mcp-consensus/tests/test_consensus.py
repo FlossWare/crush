@@ -460,7 +460,7 @@ class TestConcurrencyLimits:
 
         respx.post(CHAT_URL).mock(side_effect=tracked_post)
 
-        monkeypatch.setattr("mcp_consensus.consensus.MAX_CONCURRENT_WORKERS", 2)
+        monkeypatch.setattr("mcp_consensus.consensus._SEMAPHORE", asyncio.Semaphore(2))
 
         workers = [f"model-{i}" for i in range(5)]
         req = ConsensusRequest(prompt="test", worker_models=workers)

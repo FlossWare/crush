@@ -13,7 +13,7 @@ DEFAULT_ARBITER = "gemini-3.5-flash"
 
 
 class ConsensusRequest(BaseModel):
-    prompt: str = Field(..., description="The task, question, or code to evaluate")
+    prompt: str = Field(..., max_length=100_000, description="The task, question, or code to evaluate")
     worker_models: list[str] | None = Field(
         default=None,
         description=(

@@ -39,7 +39,7 @@ class ConsensusAPIRequest(BaseModel):
         default=ToolName.design,
         description="Consensus tool: design, review, or implement",
     )
-    prompt: str = Field(..., description="The task, question, or code to evaluate")
+    prompt: str = Field(..., max_length=100_000, description="The task, question, or code to evaluate")
     worker_models: list[str] | None = Field(
         default=None,
         description="Override default worker models. If not set, uses the configured fleet.",

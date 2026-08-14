@@ -47,6 +47,8 @@ CONFIGURED_WORKERS = (
     else list(DEFAULT_WORKERS)
 )
 
+_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_WORKERS)
+
 
 async def call_model(
     client: httpx.AsyncClient,
@@ -70,7 +72,10 @@ async def call_model(
     )
     resp.raise_for_status()
     data = resp.json()
-    return data["choices"][0]["message"]["content"]
+    choices = data.get("choices")
+    if not choices:
+        raise ValueError(f"Empty choices in response from {model}")
+    return choices[0]["message"]["content"]
 
 
 def _is_retryable(exc: Exception) -> bool:
@@ -104,6 +109,9 @@ async def call_worker(
             break
         try:
             async with semaphore:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError()
                 call_start = time.monotonic()
                 response = await asyncio.wait_for(
                     call_model(client, model, messages, temperature),
@@ -193,8 +201,6 @@ async def run_consensus(
         )
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(timeout=600)) as client:
-        semaphore = asyncio.Semaphore(MAX_CONCURRENT_WORKERS)
-
         tasks = [
             call_worker(
                 client,
@@ -203,7 +209,7 @@ async def run_consensus(
                 request.prompt,
                 request.temperature,
                 request.timeout_seconds,
-                semaphore,
+                _SEMAPHORE,
             )
             for model in workers
         ]
@@ -250,7 +256,7 @@ async def run_consensus(
             arbiter_error = True
             concatenated = _concat_worker_responses(successful)
             synthesis = (
-                f"Arbiter ({arbiter}) failed: {e}\n\n"
+                f"Arbiter ({arbiter}) failed: {type(e).__name__}\n\n"
                 f"Falling back to concatenated worker responses:\n\n"
                 f"{concatenated}"
             )
