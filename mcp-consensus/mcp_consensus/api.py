@@ -1,4 +1,3 @@
-import asyncio
 import logging
 import os
 import sys
@@ -9,7 +8,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from .consensus import run_consensus, LITELLM_URL, LITELLM_KEY
+from .consensus import LITELLM_KEY, LITELLM_URL, _parse_int_env, run_consensus
 from .models import ConsensusRequest, ConsensusResponse
 
 logging.basicConfig(level=logging.INFO, stream=sys.stderr)
@@ -51,12 +50,16 @@ class ConsensusAPIRequest(BaseModel):
     )
     temperature: float = Field(default=0.3, ge=0.0, le=1.0)
     arbiter_temperature: float | None = Field(
-        default=None, ge=0.0, le=1.0,
+        default=None,
+        ge=0.0,
+        le=1.0,
         description="Arbiter synthesis temperature. Defaults to 0.3.",
     )
     timeout_seconds: int = Field(default=60, ge=5, le=300)
     arbiter_timeout_seconds: int | None = Field(
-        default=None, ge=5, le=600,
+        default=None,
+        ge=5,
+        le=600,
         description="Arbiter timeout in seconds. Defaults to timeout_seconds.",
     )
     dry_run: bool = Field(default=False)
@@ -70,7 +73,8 @@ async def health():
             headers["Authorization"] = f"Bearer {LITELLM_KEY}"
         async with httpx.AsyncClient(timeout=5) as client:
             resp = await client.get(
-                f"{LITELLM_URL}/health/liveliness", headers=headers,
+                f"{LITELLM_URL}/health/liveliness",
+                headers=headers,
             )
             litellm_ok = resp.status_code == 200
     except Exception:
@@ -91,7 +95,8 @@ async def list_models():
             headers["Authorization"] = f"Bearer {LITELLM_KEY}"
         async with httpx.AsyncClient(timeout=httpx.Timeout(timeout=10)) as client:
             resp = await client.get(
-                f"{LITELLM_URL}/v1/models", headers=headers,
+                f"{LITELLM_URL}/v1/models",
+                headers=headers,
             )
             resp.raise_for_status()
             data = resp.json()
@@ -130,7 +135,8 @@ async def consensus(req: ConsensusAPIRequest):
 
 def main():
     host = os.environ.get("API_HOST", "127.0.0.1")
-    port = int(os.environ.get("API_PORT", "8080"))
+    # Validate like other numeric config so bad values fail clearly at startup.
+    port = _parse_int_env("API_PORT", 8080, 1, 65535)
     uvicorn.run(app, host=host, port=port)
 
 
