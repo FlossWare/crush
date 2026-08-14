@@ -78,27 +78,57 @@ class TestIsRetryable:
 
     def test_5xx_is_retryable(self):
         resp = httpx.Response(500, request=httpx.Request("POST", CHAT_URL))
-        assert _is_retryable(httpx.HTTPStatusError("", request=resp.request, response=resp)) is True
+        assert (
+            _is_retryable(
+                httpx.HTTPStatusError("", request=resp.request, response=resp)
+            )
+            is True
+        )
 
     def test_503_is_retryable(self):
         resp = httpx.Response(503, request=httpx.Request("POST", CHAT_URL))
-        assert _is_retryable(httpx.HTTPStatusError("", request=resp.request, response=resp)) is True
+        assert (
+            _is_retryable(
+                httpx.HTTPStatusError("", request=resp.request, response=resp)
+            )
+            is True
+        )
 
     def test_4xx_is_not_retryable(self):
         resp = httpx.Response(404, request=httpx.Request("POST", CHAT_URL))
-        assert _is_retryable(httpx.HTTPStatusError("", request=resp.request, response=resp)) is False
+        assert (
+            _is_retryable(
+                httpx.HTTPStatusError("", request=resp.request, response=resp)
+            )
+            is False
+        )
 
     def test_401_is_not_retryable(self):
         resp = httpx.Response(401, request=httpx.Request("POST", CHAT_URL))
-        assert _is_retryable(httpx.HTTPStatusError("", request=resp.request, response=resp)) is False
+        assert (
+            _is_retryable(
+                httpx.HTTPStatusError("", request=resp.request, response=resp)
+            )
+            is False
+        )
 
     def test_429_is_retryable(self):
         resp = httpx.Response(429, request=httpx.Request("POST", CHAT_URL))
-        assert _is_retryable(httpx.HTTPStatusError("", request=resp.request, response=resp)) is True
+        assert (
+            _is_retryable(
+                httpx.HTTPStatusError("", request=resp.request, response=resp)
+            )
+            is True
+        )
 
     def test_400_is_not_retryable(self):
         resp = httpx.Response(400, request=httpx.Request("POST", CHAT_URL))
-        assert _is_retryable(httpx.HTTPStatusError("", request=resp.request, response=resp)) is False
+        assert (
+            _is_retryable(
+                httpx.HTTPStatusError("", request=resp.request, response=resp)
+            )
+            is False
+        )
 
     def test_connect_error_is_retryable(self):
         assert _is_retryable(httpx.ConnectError("refused")) is True
@@ -177,6 +207,11 @@ class TestDryRun:
             result = await run_consensus("multi_ai_design", req)
         assert "DRY RUN" in result.synthesized_response
         assert len(result.successful_workers) == 0
+
+    async def test_dry_run_empty_workers_raises(self):
+        req = ConsensusRequest(prompt="test", dry_run=True, worker_models=[])
+        with pytest.raises(ValueError, match="No worker models"):
+            await run_consensus("multi_ai_design", req)
 
 
 # --- Worker selection ---
@@ -268,7 +303,7 @@ class TestWorkerFailure:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                return httpx.Response(200, json=_chat_response("worker response"))
+                return httpx.Response(200, json=_chat_response("worker response body"))
             return httpx.Response(500, text="arbiter down")
 
         respx.post(CHAT_URL).mock(side_effect=route_handler)
@@ -280,13 +315,12 @@ class TestWorkerFailure:
         )
         result = await run_consensus("multi_ai_design", req)
         assert result.arbiter_failed is True
-        assert (
-            "failed" in result.synthesized_response.lower()
-            or "Arbiter" in result.synthesized_response
-        )
+        # Documented contract: useful degraded response in synthesized_response
+        assert "worker response body" in result.synthesized_response
+        assert "Falling back to concatenated worker responses" in result.synthesized_response
         assert result.successful_workers == ["w1"]
         assert len(result.raw_worker_responses) == 1
-        assert result.raw_worker_responses[0].response == "worker response"
+        assert result.raw_worker_responses[0].response == "worker response body"
 
     @respx.mock
     async def test_non_retryable_error_fails_immediately(self, monkeypatch):
@@ -362,7 +396,7 @@ class TestTimeoutSemantics:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                return httpx.Response(200, json=_chat_response("worker ok"))
+                return httpx.Response(200, json=_chat_response("worker ok content"))
             await asyncio.sleep(15)
             return httpx.Response(200, json=_chat_response("arbiter ok"))
 
@@ -376,10 +410,7 @@ class TestTimeoutSemantics:
         )
         result = await run_consensus("multi_ai_design", req)
         assert result.arbiter_failed is True
-        assert (
-            "failed" in result.synthesized_response.lower()
-            or "Arbiter" in result.synthesized_response
-        )
+        assert "worker ok content" in result.synthesized_response
 
     @respx.mock
     async def test_arbiter_temperature_separate(self, monkeypatch):
