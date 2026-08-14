@@ -12,16 +12,16 @@ jobs:
   create-issues:
     if: >-
       contains(fromJSON('["SonarCloud Code Analysis", "GitGuardian Security Checks"]'), github.event.check_run.name)
-      && github.event.check_run.conclusion != 'success'
-      || (
-        github.event.check_run.name == 'SonarCloud Code Analysis'
-        && github.event.check_run.output.annotations_count > 0
+      && (
+        github.event.check_run.conclusion != 'success'
+        || github.event.check_run.output.annotations_count > 0
       )
     runs-on: ubuntu-latest
     steps:
       - name: Fetch annotations and create issues
         uses: actions/github-script@v7
         with:
+          retries: 3
           script: |
             const checkRun = context.payload.check_run;
             const owner = context.repo.owner;
@@ -29,10 +29,8 @@ jobs:
             const checkName = checkRun.name;
             const conclusion = checkRun.conclusion;
 
-            // Collect findings from annotations and/or failure status
             const findings = [];
 
-            // 1. If the check failed outright, that's a finding
             if (conclusion === 'failure' || conclusion === 'action_required') {
               findings.push({
                 title: `${checkName}: check ${conclusion}`,
@@ -40,7 +38,7 @@ jobs:
                   `## ${checkName} — ${conclusion}`,
                   '',
                   `**Check run:** ${checkRun.html_url}`,
-                  `**Commit:** ${checkRun.head_sha.slice(0, 7)}`,
+                  `**Commit:** \`${checkRun.head_sha.slice(0, 7)}\``,
                   `**Branch:** ${checkRun.check_suite?.head_branch || 'unknown'}`,
                   '',
                   `### Output`,
@@ -57,10 +55,9 @@ jobs:
               });
             }
 
-            // 2. Fetch annotations (warnings/errors) from the check run
             const annotations = await github.paginate(
               github.rest.checks.listAnnotations,
-              { owner, repo, check_run_id: checkRun.id, per_page: 50 }
+              { owner, repo, check_run_id: checkRun.id, per_page: 100 }
             );
 
             for (const ann of annotations) {
@@ -78,13 +75,14 @@ jobs:
                   '',
                   `**Level:** ${level}`,
                   `**File:** \`${location}\``,
-                  `**Commit:** ${checkRun.head_sha.slice(0, 7)}`,
+                  `**Commit:** \`${checkRun.head_sha.slice(0, 7)}\``,
                   `**Check run:** ${checkRun.html_url}`,
                   '',
                   `### Message`,
                   ann.message,
                   '',
                   ann.raw_details ? `### Details\n${ann.raw_details}\n` : '',
+                  `<!-- fingerprint: ${checkName}|${ann.path}|${ann.start_line}|${(ann.title || ann.message).slice(0, 120)} -->`,
                   `---`,
                   `*Auto-created by check-findings-to-issues workflow*`,
                 ].join('\n'),
@@ -99,7 +97,6 @@ jobs:
               return;
             }
 
-            // 3. Deduplicate against existing open issues
             const existingIssues = await github.paginate(
               github.rest.issues.listForRepo,
               { owner, repo, state: 'open', per_page: 100 }
@@ -113,29 +110,36 @@ jobs:
                 continue;
               }
 
-              // Ensure labels exist (ignore errors if they already do)
               for (const label of finding.labels) {
                 try {
                   await github.rest.issues.getLabel({ owner, repo, name: label });
                 } catch {
-                  await github.rest.issues.createLabel({
-                    owner, repo,
-                    name: label,
-                    color: label === 'security' ? 'e11d48'
-                         : label === 'sonarcloud' ? '4c9bd6'
-                         : 'd73a4a',
-                  });
+                  try {
+                    await github.rest.issues.createLabel({
+                      owner, repo,
+                      name: label,
+                      color: label === 'security' ? 'e11d48'
+                           : label === 'sonarcloud' ? '4c9bd6'
+                           : 'd73a4a',
+                    });
+                  } catch (e) {
+                    core.warning(`Could not create label "${label}": ${e.message}`);
+                  }
                 }
               }
 
-              const issue = await github.rest.issues.create({
-                owner, repo,
-                title: finding.title,
-                body: finding.body,
-                labels: finding.labels,
-              });
-              core.info(`Created issue #${issue.data.number}: ${finding.title}`);
-              created++;
+              try {
+                const issue = await github.rest.issues.create({
+                  owner, repo,
+                  title: finding.title,
+                  body: finding.body,
+                  labels: finding.labels,
+                });
+                core.info(`Created issue #${issue.data.number}: ${finding.title}`);
+                created++;
+              } catch (e) {
+                core.error(`Failed to create issue "${finding.title}": ${e.message}`);
+              }
             }
 
             core.info(`Done. Created ${created} issue(s), skipped ${findings.length - created} duplicate(s).`);
