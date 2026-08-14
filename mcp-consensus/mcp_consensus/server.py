@@ -6,13 +6,20 @@ import sys
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import (
-    CallToolRequest,
+    CallToolRequestParams,
     CallToolResult,
-    ListToolsRequest,
     ListToolsResult,
+    PaginatedRequestParams,
     TextContent,
     Tool,
 )
+
+try:
+    from mcp.server import ServerRequestContext
+except ImportError:  # pragma: no cover - older type stubs
+    from typing import Any
+
+    ServerRequestContext = Any  # type: ignore[misc, assignment]
 
 from .consensus import run_consensus
 from .models import ConsensusRequest
@@ -29,7 +36,7 @@ TOOLS = [
             "Get multi-model AI analysis on architecture and design decisions. "
             "Fans out to N free AI models in parallel, then an arbiter synthesizes the results."
         ),
-        inputSchema=INPUT_SCHEMA,
+        input_schema=INPUT_SCHEMA,
     ),
     Tool(
         name="multi_ai_review",
@@ -37,7 +44,7 @@ TOOLS = [
             "Get multi-model code review analysis. "
             "Each model independently reviews the code, then an arbiter synthesizes findings."
         ),
-        inputSchema=INPUT_SCHEMA,
+        input_schema=INPUT_SCHEMA,
     ),
     Tool(
         name="multi_ai_implement",
@@ -45,22 +52,26 @@ TOOLS = [
             "Get multi-model implementation suggestions. "
             "Each model independently proposes an implementation, then an arbiter picks the best approach."
         ),
-        inputSchema=INPUT_SCHEMA,
+        input_schema=INPUT_SCHEMA,
     ),
 ]
 
 VALID_TOOLS = {t.name for t in TOOLS}
 
-app = Server("mcp-consensus")
 
-
-async def _handle_list_tools(req: ListToolsRequest) -> ListToolsResult:
+async def _handle_list_tools(
+    ctx: ServerRequestContext,
+    params: PaginatedRequestParams | None,
+) -> ListToolsResult:
     return ListToolsResult(tools=TOOLS)
 
 
-async def _handle_call_tool(req: CallToolRequest) -> CallToolResult:
-    name = req.params.name
-    arguments = req.params.arguments or {}
+async def _handle_call_tool(
+    ctx: ServerRequestContext,
+    params: CallToolRequestParams,
+) -> CallToolResult:
+    name = params.name
+    arguments = params.arguments or {}
 
     if name not in VALID_TOOLS:
         return CallToolResult(
@@ -73,7 +84,12 @@ async def _handle_call_tool(req: CallToolRequest) -> CallToolResult:
     except Exception as e:
         logger.warning("Invalid arguments for %s: %s", name, e)
         return CallToolResult(
-            content=[TextContent(type="text", text="Invalid arguments: check required fields (prompt is required)")],
+            content=[
+                TextContent(
+                    type="text",
+                    text="Invalid arguments: check required fields (prompt is required)",
+                )
+            ],
             is_error=True,
         )
 
@@ -106,7 +122,11 @@ async def _handle_call_tool(req: CallToolRequest) -> CallToolResult:
 
     if result.raw_worker_responses:
         output["raw_worker_responses"] = [
-            {"model": wr.model, "response": wr.response, "latency_ms": wr.latency_ms}
+            {
+                "model": wr.model,
+                "response": wr.response,
+                "latency_ms": wr.latency_ms,
+            }
             for wr in result.raw_worker_responses
         ]
 
@@ -115,13 +135,20 @@ async def _handle_call_tool(req: CallToolRequest) -> CallToolResult:
     )
 
 
-app.add_request_handler("tools/list", ListToolsRequest, _handle_list_tools)
-app.add_request_handler("tools/call", CallToolRequest, _handle_call_tool)
+app = Server(
+    "mcp-consensus",
+    on_list_tools=_handle_list_tools,
+    on_call_tool=_handle_call_tool,
+)
 
 
 async def main():
     async with stdio_server() as (read_stream, write_stream):
-        await app.run(read_stream, write_stream, app.create_initialization_options())
+        await app.run(
+            read_stream,
+            write_stream,
+            app.create_initialization_options(),
+        )
 
 
 def entry():
