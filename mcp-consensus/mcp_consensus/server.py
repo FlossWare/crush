@@ -85,12 +85,19 @@ async def _handle_call_tool(req: CallToolRequest) -> CallToolResult:
         request.dry_run,
     )
 
-    result = await run_consensus(name, request)
+    try:
+        result = await run_consensus(name, request)
+    except ValueError as e:
+        return CallToolResult(
+            content=[TextContent(type="text", text=json.dumps({"error": str(e)}))],
+            is_error=True,
+        )
 
     output = {
         "synthesized_response": result.synthesized_response,
         "consensus_metadata": {
             "arbiter_model": result.arbiter_model,
+            "arbiter_failed": result.arbiter_failed,
             "execution_time_ms": result.execution_time_ms,
             "successful_workers": result.successful_workers,
             "failed_workers": [fw.model_dump() for fw in result.failed_workers],

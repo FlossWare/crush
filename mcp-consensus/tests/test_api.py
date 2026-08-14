@@ -110,6 +110,15 @@ class TestConsensusEndpoint:
         })
         assert resp.status_code == 422
 
+    def test_empty_workers_returns_422(self, client):
+        resp = client.post("/v1/consensus", json={
+            "prompt": "test",
+            "worker_models": [],
+            "tool": "design",
+        })
+        assert resp.status_code == 422
+        assert "No worker models" in resp.json()["detail"]
+
     @respx.mock
     def test_new_fields_forwarded(self, client, monkeypatch):
         monkeypatch.setattr("mcp_consensus.consensus.WORKER_RETRIES", 0)

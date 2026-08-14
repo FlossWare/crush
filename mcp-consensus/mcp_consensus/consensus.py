@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import random
 import time
 
 import httpx
@@ -72,16 +73,12 @@ async def call_model(
     return data["choices"][0]["message"]["content"]
 
 
-async def _call_with_semaphore(semaphore, coro):
-    async with semaphore:
-        return await coro
-
-
 def _is_retryable(exc: Exception) -> bool:
     if isinstance(exc, asyncio.TimeoutError):
         return True
     if isinstance(exc, httpx.HTTPStatusError):
-        return exc.response.status_code >= 500
+        status = exc.response.status_code
+        return status >= 500 or status == 429
     if isinstance(exc, (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout)):
         return True
     return False
@@ -106,11 +103,13 @@ async def call_worker(
             last_error = last_error or asyncio.TimeoutError()
             break
         try:
-            response = await asyncio.wait_for(
-                _call_with_semaphore(semaphore, call_model(client, model, messages, temperature)),
-                timeout=remaining,
-            )
-            latency = int((time.monotonic() - start) * 1000)
+            async with semaphore:
+                call_start = time.monotonic()
+                response = await asyncio.wait_for(
+                    call_model(client, model, messages, temperature),
+                    timeout=remaining,
+                )
+            latency = int((time.monotonic() - call_start) * 1000)
             logger.info("Worker %s succeeded (%dms)", model, latency)
             return WorkerResponse(model=model, response=response, latency_ms=latency)
         except Exception as e:
@@ -119,7 +118,10 @@ async def call_worker(
                 logger.warning("Worker %s failed with non-retryable error: %s", model, e)
                 return FailedWorker(model=model, error=str(e))
             if attempt < WORKER_RETRIES:
-                delay = min(2 ** attempt, max(0, deadline - time.monotonic()))
+                delay = min(
+                    (2 ** attempt) + random.uniform(0, 1),
+                    max(0, deadline - time.monotonic()),
+                )
                 if delay <= 0:
                     break
                 logger.info(
@@ -129,7 +131,6 @@ async def call_worker(
                 await asyncio.sleep(delay)
     logger.warning("Worker %s failed after %d attempts: %s", model, 1 + WORKER_RETRIES, last_error)
     return FailedWorker(model=model, error=str(last_error))
-
 
 
 def _resolve_workers(request: ConsensusRequest) -> list[str]:
@@ -166,14 +167,7 @@ async def run_consensus(
         )
 
     if not workers:
-        return ConsensusResponse(
-            synthesized_response="No worker models configured. Set WORKER_FLEET env var or pass worker_models.",
-            arbiter_model=arbiter,
-            execution_time_ms=int((time.monotonic() - start) * 1000),
-            successful_workers=[],
-            failed_workers=[],
-            raw_worker_responses=[],
-        )
+        raise ValueError("No worker models configured. Set WORKER_FLEET env var or pass worker_models.")
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(timeout=600)) as client:
         semaphore = asyncio.Semaphore(MAX_CONCURRENT_WORKERS)
@@ -210,23 +204,20 @@ async def run_consensus(
         arbiter_temp = request.arbiter_temperature if request.arbiter_temperature is not None else 0.3
         arbiter_timeout = request.arbiter_timeout_seconds or request.timeout_seconds
 
+        arbiter_error = False
         try:
             synthesis = await asyncio.wait_for(
                 call_model(client, arbiter, arbiter_messages, arbiter_temp),
                 timeout=arbiter_timeout,
             )
         except Exception as e:
-            synthesis = (
-                f"Arbiter ({arbiter}) failed: {e}\n\n"
-                f"Returning raw worker responses without synthesis.\n\n"
-                + "\n---\n".join(
-                    f"**{w.model}:**\n{w.response}" for w in successful
-                )
-            )
+            arbiter_error = True
+            synthesis = f"Arbiter ({arbiter}) failed: {e}"
 
     return ConsensusResponse(
         synthesized_response=synthesis,
         arbiter_model=arbiter,
+        arbiter_failed=arbiter_error,
         execution_time_ms=int((time.monotonic() - start) * 1000),
         successful_workers=[w.model for w in successful],
         failed_workers=failed,

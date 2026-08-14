@@ -70,6 +70,7 @@ class WorkerResponse(BaseModel):
 class ConsensusResponse(BaseModel):
     synthesized_response: str
     arbiter_model: str
+    arbiter_failed: bool = False
     execution_time_ms: int
     successful_workers: list[str]
     failed_workers: list[FailedWorker]

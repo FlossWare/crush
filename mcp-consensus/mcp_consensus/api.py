@@ -120,6 +120,8 @@ async def consensus(req: ConsensusAPIRequest):
     tool_name = TOOL_MAP[req.tool.value]
     try:
         result = await run_consensus(tool_name, inner)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
         logger.error("Consensus failed: %s", e)
         raise HTTPException(status_code=502, detail="Consensus execution failed")

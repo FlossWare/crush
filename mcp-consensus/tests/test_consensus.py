@@ -88,10 +88,6 @@ class TestIsRetryable:
         resp = httpx.Response(503, request=httpx.Request("POST", CHAT_URL))
         assert _is_retryable(httpx.HTTPStatusError("", request=resp.request, response=resp)) is True
 
-    def test_429_is_not_retryable(self):
-        resp = httpx.Response(429, request=httpx.Request("POST", CHAT_URL))
-        assert _is_retryable(httpx.HTTPStatusError("", request=resp.request, response=resp)) is False
-
     def test_4xx_is_not_retryable(self):
         resp = httpx.Response(404, request=httpx.Request("POST", CHAT_URL))
         assert _is_retryable(httpx.HTTPStatusError("", request=resp.request, response=resp)) is False
@@ -99,6 +95,10 @@ class TestIsRetryable:
     def test_401_is_not_retryable(self):
         resp = httpx.Response(401, request=httpx.Request("POST", CHAT_URL))
         assert _is_retryable(httpx.HTTPStatusError("", request=resp.request, response=resp)) is False
+
+    def test_429_is_retryable(self):
+        resp = httpx.Response(429, request=httpx.Request("POST", CHAT_URL))
+        assert _is_retryable(httpx.HTTPStatusError("", request=resp.request, response=resp)) is True
 
     def test_400_is_not_retryable(self):
         resp = httpx.Response(400, request=httpx.Request("POST", CHAT_URL))
@@ -197,10 +197,10 @@ class TestWorkerSelection:
         result = await run_consensus("multi_ai_design", req)
         assert len(result.successful_workers) == len(DEFAULT_WORKERS)
 
-    async def test_empty_workers_returns_error(self):
+    async def test_empty_workers_raises(self):
         req = ConsensusRequest(prompt="test", worker_models=[])
-        result = await run_consensus("multi_ai_design", req)
-        assert "No worker models" in result.synthesized_response
+        with pytest.raises(ValueError, match="No worker models"):
+            await run_consensus("multi_ai_design", req)
 
 
 # --- Timeout and failure scenarios ---
@@ -276,9 +276,11 @@ class TestWorkerFailure:
             arbiter_model="bad-arbiter",
         )
         result = await run_consensus("multi_ai_design", req)
+        assert result.arbiter_failed is True
         assert "failed" in result.synthesized_response.lower() or "Arbiter" in result.synthesized_response
-        assert "worker response" in result.synthesized_response
         assert result.successful_workers == ["w1"]
+        assert len(result.raw_worker_responses) == 1
+        assert result.raw_worker_responses[0].response == "worker response"
 
     @respx.mock
     async def test_non_retryable_error_fails_immediately(self, monkeypatch):
@@ -367,6 +369,7 @@ class TestTimeoutSemantics:
             arbiter_timeout_seconds=5,
         )
         result = await run_consensus("multi_ai_design", req)
+        assert result.arbiter_failed is True
         assert "failed" in result.synthesized_response.lower() or "Arbiter" in result.synthesized_response
 
     @respx.mock
