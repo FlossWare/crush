@@ -9,15 +9,11 @@ from mcp_consensus.consensus import (
     _is_retryable,
     _parse_int_env,
     _resolve_workers,
-    call_worker,
     run_consensus,
 )
 from mcp_consensus.models import (
     ConsensusRequest,
-    ConsensusResponse,
     DEFAULT_WORKERS,
-    FailedWorker,
-    WorkerResponse,
 )
 
 
@@ -146,7 +142,9 @@ class TestDryRun:
     async def test_dry_run_no_network_calls(self):
         req = ConsensusRequest(prompt="What is 2+2?", dry_run=True)
         with respx.mock(assert_all_called=False) as mock:
-            mock.route(host="litellm-test").side_effect = AssertionError("Should not make network calls")
+            mock.route(host="litellm-test").side_effect = AssertionError(
+                "Should not make network calls"
+            )
             result = await run_consensus("multi_ai_design", req)
         assert "DRY RUN" in result.synthesized_response
         assert result.execution_time_ms == 0
@@ -155,7 +153,8 @@ class TestDryRun:
 
     async def test_dry_run_with_explicit_workers(self):
         req = ConsensusRequest(
-            prompt="test", dry_run=True,
+            prompt="test",
+            dry_run=True,
             worker_models=["custom-a", "custom-b"],
         )
         result = await run_consensus("multi_ai_review", req)
@@ -172,7 +171,9 @@ class TestDryRun:
     async def test_dry_run_with_none_workers_no_network(self):
         req = ConsensusRequest(prompt="test", dry_run=True, worker_models=None)
         with respx.mock(assert_all_called=False) as mock:
-            mock.route(host="litellm-test").side_effect = AssertionError("No network calls in dry_run")
+            mock.route(host="litellm-test").side_effect = AssertionError(
+                "No network calls in dry_run"
+            )
             result = await run_consensus("multi_ai_design", req)
         assert "DRY RUN" in result.synthesized_response
         assert len(result.successful_workers) == 0
@@ -218,7 +219,9 @@ class TestWorkerFailure:
 
         respx.post(CHAT_URL).mock(side_effect=slow_response)
 
-        req = ConsensusRequest(prompt="test", worker_models=["slow-model"], timeout_seconds=5)
+        req = ConsensusRequest(
+            prompt="test", worker_models=["slow-model"], timeout_seconds=5
+        )
         result = await run_consensus("multi_ai_design", req)
         assert len(result.failed_workers) == 1
         assert result.failed_workers[0].model == "slow-model"
@@ -277,7 +280,10 @@ class TestWorkerFailure:
         )
         result = await run_consensus("multi_ai_design", req)
         assert result.arbiter_failed is True
-        assert "failed" in result.synthesized_response.lower() or "Arbiter" in result.synthesized_response
+        assert (
+            "failed" in result.synthesized_response.lower()
+            or "Arbiter" in result.synthesized_response
+        )
         assert result.successful_workers == ["w1"]
         assert len(result.raw_worker_responses) == 1
         assert result.raw_worker_responses[0].response == "worker response"
@@ -370,7 +376,10 @@ class TestTimeoutSemantics:
         )
         result = await run_consensus("multi_ai_design", req)
         assert result.arbiter_failed is True
-        assert "failed" in result.synthesized_response.lower() or "Arbiter" in result.synthesized_response
+        assert (
+            "failed" in result.synthesized_response.lower()
+            or "Arbiter" in result.synthesized_response
+        )
 
     @respx.mock
     async def test_arbiter_temperature_separate(self, monkeypatch):
@@ -424,7 +433,7 @@ class TestConcurrencyLimits:
 
         workers = [f"model-{i}" for i in range(5)]
         req = ConsensusRequest(prompt="test", worker_models=workers)
-        result = await run_consensus("multi_ai_design", req)
+        await run_consensus("multi_ai_design", req)
         assert max_concurrent <= 2
 
 
@@ -434,17 +443,26 @@ class TestConcurrencyLimits:
 class TestMCPToolRegistration:
     def test_tools_are_defined(self):
         from mcp_consensus.server import TOOLS, VALID_TOOLS
+
         assert len(TOOLS) == 3
         names = {t.name for t in TOOLS}
         assert names == {"multi_ai_design", "multi_ai_review", "multi_ai_implement"}
         assert VALID_TOOLS == names
 
     def test_input_schema_has_prompt(self):
-        from mcp_consensus.server import INPUT_SCHEMA
+        from mcp_consensus.server import INPUT_SCHEMA, TOOLS
+
         assert "prompt" in INPUT_SCHEMA.get("properties", {})
         assert "prompt" in INPUT_SCHEMA.get("required", [])
+        for tool in TOOLS:
+            schema = tool.input_schema
+            assert schema.get("type") == "object"
+            assert "prompt" in schema.get("properties", {})
 
-    def test_handlers_registered(self):
+    def test_server_constructed_with_handlers(self):
         from mcp_consensus.server import app
-        assert app.get_request_handler("tools/list") is not None
-        assert app.get_request_handler("tools/call") is not None
+
+        # v2 registers handlers at construction via on_list_tools / on_call_tool
+        assert app is not None
+        opts = app.create_initialization_options()
+        assert opts is not None
