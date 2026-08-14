@@ -50,6 +50,13 @@ CONFIGURED_WORKERS = (
 _SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_WORKERS)
 
 
+def _client_safe_error(exc: Exception) -> str:
+    """Client-facing error token — type name only, no message body."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"HTTPStatusError:{exc.response.status_code}"
+    return type(exc).__name__
+
+
 async def call_model(
     client: httpx.AsyncClient,
     model: str,
@@ -124,7 +131,7 @@ async def call_worker(
             last_error = e
             if not _is_retryable(e):
                 logger.warning("Worker %s failed with non-retryable error: %s", model, e)
-                return FailedWorker(model=model, error=str(e))
+                return FailedWorker(model=model, error=_client_safe_error(e))
             if attempt < WORKER_RETRIES:
                 delay = min(
                     (2 ** attempt) + random.uniform(0, 1),
@@ -143,7 +150,10 @@ async def call_worker(
         1 + WORKER_RETRIES,
         last_error,
     )
-    return FailedWorker(model=model, error=str(last_error))
+    return FailedWorker(
+        model=model,
+        error=_client_safe_error(last_error) if last_error else "UnknownError",
+    )
 
 
 def _resolve_workers(request: ConsensusRequest) -> list[str]:
@@ -260,7 +270,9 @@ async def run_consensus(
                 f"Falling back to concatenated worker responses:\n\n"
                 f"{concatenated}"
             )
-            logger.warning("Arbiter %s failed; returning concatenated workers: %s", arbiter, e)
+            logger.warning(
+                "Arbiter %s failed; returning concatenated workers: %s", arbiter, e
+            )
 
     return ConsensusResponse(
         synthesized_response=synthesis,
