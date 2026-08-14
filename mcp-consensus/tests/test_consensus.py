@@ -57,6 +57,21 @@ class TestParseIntEnv:
         with pytest.raises(SystemExit, match="must be between"):
             _parse_int_env("TEST_VAL", 10, 1, 50)
 
+    def test_negative_rejected(self, monkeypatch):
+        monkeypatch.setenv("TEST_VAL", "-1")
+        with pytest.raises(SystemExit, match="must be between"):
+            _parse_int_env("TEST_VAL", 10, 1, 50)
+
+    def test_zero_rejected_when_min_is_one(self, monkeypatch):
+        monkeypatch.setenv("TEST_VAL", "0")
+        with pytest.raises(SystemExit, match="must be between"):
+            _parse_int_env("TEST_VAL", 10, 1, 50)
+
+    def test_empty_string_rejected(self, monkeypatch):
+        monkeypatch.setenv("TEST_VAL", "")
+        with pytest.raises(SystemExit, match="not a valid integer"):
+            _parse_int_env("TEST_VAL", 10, 1, 50)
+
 
 # --- Retry logic ---
 
@@ -69,6 +84,14 @@ class TestIsRetryable:
         resp = httpx.Response(500, request=httpx.Request("POST", CHAT_URL))
         assert _is_retryable(httpx.HTTPStatusError("", request=resp.request, response=resp)) is True
 
+    def test_503_is_retryable(self):
+        resp = httpx.Response(503, request=httpx.Request("POST", CHAT_URL))
+        assert _is_retryable(httpx.HTTPStatusError("", request=resp.request, response=resp)) is True
+
+    def test_429_is_not_retryable(self):
+        resp = httpx.Response(429, request=httpx.Request("POST", CHAT_URL))
+        assert _is_retryable(httpx.HTTPStatusError("", request=resp.request, response=resp)) is False
+
     def test_4xx_is_not_retryable(self):
         resp = httpx.Response(404, request=httpx.Request("POST", CHAT_URL))
         assert _is_retryable(httpx.HTTPStatusError("", request=resp.request, response=resp)) is False
@@ -77,8 +100,15 @@ class TestIsRetryable:
         resp = httpx.Response(401, request=httpx.Request("POST", CHAT_URL))
         assert _is_retryable(httpx.HTTPStatusError("", request=resp.request, response=resp)) is False
 
+    def test_400_is_not_retryable(self):
+        resp = httpx.Response(400, request=httpx.Request("POST", CHAT_URL))
+        assert _is_retryable(httpx.HTTPStatusError("", request=resp.request, response=resp)) is False
+
     def test_connect_error_is_retryable(self):
         assert _is_retryable(httpx.ConnectError("refused")) is True
+
+    def test_read_timeout_is_retryable(self):
+        assert _is_retryable(httpx.ReadTimeout("timeout")) is True
 
     def test_generic_exception_is_not_retryable(self):
         assert _is_retryable(ValueError("bad")) is False
@@ -100,6 +130,12 @@ class TestResolveWorkers:
         req = ConsensusRequest(prompt="test")
         result = _resolve_workers(req)
         assert result == list(DEFAULT_WORKERS)
+
+    def test_none_and_empty_are_distinct(self):
+        none_req = ConsensusRequest(prompt="test", worker_models=None)
+        empty_req = ConsensusRequest(prompt="test", worker_models=[])
+        assert _resolve_workers(none_req) == list(DEFAULT_WORKERS)
+        assert _resolve_workers(empty_req) == []
 
 
 # --- Dry run ---
@@ -132,6 +168,14 @@ class TestDryRun:
         result = await run_consensus("multi_ai_design", req)
         for model in DEFAULT_WORKERS:
             assert model in result.synthesized_response
+
+    async def test_dry_run_with_none_workers_no_network(self):
+        req = ConsensusRequest(prompt="test", dry_run=True, worker_models=None)
+        with respx.mock(assert_all_called=False) as mock:
+            mock.route(host="litellm-test").side_effect = AssertionError("No network calls in dry_run")
+            result = await run_consensus("multi_ai_design", req)
+        assert "DRY RUN" in result.synthesized_response
+        assert len(result.successful_workers) == 0
 
 
 # --- Worker selection ---
@@ -182,11 +226,8 @@ class TestWorkerFailure:
     @respx.mock
     async def test_partial_failure(self, monkeypatch):
         monkeypatch.setattr("mcp_consensus.consensus.WORKER_RETRIES", 0)
-        call_count = 0
 
         def route_handler(request):
-            nonlocal call_count
-            call_count += 1
             body = json.loads(request.content)
             if body["model"] == "bad-model":
                 return httpx.Response(500, text="Internal Server Error")
@@ -223,7 +264,6 @@ class TestWorkerFailure:
         def route_handler(request):
             nonlocal call_count
             call_count += 1
-            body = json.loads(request.content)
             if call_count == 1:
                 return httpx.Response(200, json=_chat_response("worker response"))
             return httpx.Response(500, text="arbiter down")
@@ -243,47 +283,42 @@ class TestWorkerFailure:
     @respx.mock
     async def test_non_retryable_error_fails_immediately(self, monkeypatch):
         monkeypatch.setattr("mcp_consensus.consensus.WORKER_RETRIES", 3)
-        respx.post(CHAT_URL).respond(status_code=404)
+        call_count = 0
+
+        def route_handler(request):
+            nonlocal call_count
+            call_count += 1
+            return httpx.Response(404, text="Not Found")
+
+        respx.post(CHAT_URL).mock(side_effect=route_handler)
 
         req = ConsensusRequest(prompt="test", worker_models=["m1"])
         result = await run_consensus("multi_ai_design", req)
         assert len(result.failed_workers) == 1
         assert "404" in result.failed_workers[0].error
+        assert call_count == 1  # no retries for 4xx
 
-
-# --- Concurrency limits ---
-
-
-@pytest.mark.asyncio
-class TestConcurrencyLimits:
     @respx.mock
-    async def test_semaphore_limits_concurrency(self, monkeypatch):
-        monkeypatch.setattr("mcp_consensus.consensus.WORKER_RETRIES", 0)
-        max_concurrent = 0
-        current_concurrent = 0
-        lock = asyncio.Lock()
+    async def test_transient_failure_retries_then_succeeds(self, monkeypatch):
+        monkeypatch.setattr("mcp_consensus.consensus.WORKER_RETRIES", 2)
+        call_count = 0
 
-        original_post = httpx.AsyncClient.post
+        def route_handler(request):
+            nonlocal call_count
+            call_count += 1
+            body = json.loads(request.content)
+            if body["model"] == "flaky-worker":
+                if call_count <= 2:
+                    return httpx.Response(500, text="Server Error")
+                return httpx.Response(200, json=_chat_response("succeeded on retry"))
+            return httpx.Response(200, json=_chat_response("arbiter synthesis"))
 
-        async def tracked_post(self, url, **kwargs):
-            nonlocal max_concurrent, current_concurrent
-            async with lock:
-                current_concurrent += 1
-                if current_concurrent > max_concurrent:
-                    max_concurrent = current_concurrent
-            await asyncio.sleep(0.05)
-            async with lock:
-                current_concurrent -= 1
-            return httpx.Response(200, json=_chat_response("ok"))
+        respx.post(CHAT_URL).mock(side_effect=route_handler)
 
-        respx.post(CHAT_URL).mock(side_effect=tracked_post)
-
-        monkeypatch.setattr("mcp_consensus.consensus.MAX_CONCURRENT_WORKERS", 2)
-
-        workers = [f"model-{i}" for i in range(5)]
-        req = ConsensusRequest(prompt="test", worker_models=workers)
+        req = ConsensusRequest(prompt="test", worker_models=["flaky-worker"])
         result = await run_consensus("multi_ai_design", req)
-        assert max_concurrent <= 2
+        assert "flaky-worker" in result.successful_workers
+        assert call_count >= 3  # 2 failures + 1 success + arbiter
 
 
 # --- Timeout semantics ---
@@ -291,6 +326,25 @@ class TestConcurrencyLimits:
 
 @pytest.mark.asyncio
 class TestTimeoutSemantics:
+    @respx.mock
+    async def test_total_deadline_not_per_attempt(self, monkeypatch):
+        """Retries share the total deadline — a 5s deadline with 2 retries
+        does NOT allow 3 × 5s = 15s of wall-clock time."""
+        monkeypatch.setattr("mcp_consensus.consensus.WORKER_RETRIES", 2)
+
+        async def slow_response(request):
+            await asyncio.sleep(10)
+            return httpx.Response(200, json=_chat_response("late"))
+
+        respx.post(CHAT_URL).mock(side_effect=slow_response)
+
+        req = ConsensusRequest(prompt="test", worker_models=["slow"], timeout_seconds=5)
+        start = asyncio.get_event_loop().time()
+        result = await run_consensus("multi_ai_design", req)
+        elapsed = asyncio.get_event_loop().time() - start
+        assert len(result.failed_workers) == 1
+        assert elapsed < 8  # well under 3 × 5 = 15s
+
     @respx.mock
     async def test_separate_arbiter_timeout(self, monkeypatch):
         monkeypatch.setattr("mcp_consensus.consensus.WORKER_RETRIES", 0)
@@ -338,7 +392,40 @@ class TestTimeoutSemantics:
         assert temperatures[1] == 0.1
 
 
-# --- MCP tool registration ---
+# --- Concurrency limits ---
+
+
+@pytest.mark.asyncio
+class TestConcurrencyLimits:
+    @respx.mock
+    async def test_semaphore_limits_concurrency(self, monkeypatch):
+        monkeypatch.setattr("mcp_consensus.consensus.WORKER_RETRIES", 0)
+        max_concurrent = 0
+        current_concurrent = 0
+        lock = asyncio.Lock()
+
+        async def tracked_post(request):
+            nonlocal max_concurrent, current_concurrent
+            async with lock:
+                current_concurrent += 1
+                if current_concurrent > max_concurrent:
+                    max_concurrent = current_concurrent
+            await asyncio.sleep(0.05)
+            async with lock:
+                current_concurrent -= 1
+            return httpx.Response(200, json=_chat_response("ok"))
+
+        respx.post(CHAT_URL).mock(side_effect=tracked_post)
+
+        monkeypatch.setattr("mcp_consensus.consensus.MAX_CONCURRENT_WORKERS", 2)
+
+        workers = [f"model-{i}" for i in range(5)]
+        req = ConsensusRequest(prompt="test", worker_models=workers)
+        result = await run_consensus("multi_ai_design", req)
+        assert max_concurrent <= 2
+
+
+# --- MCP tool registration (basic checks; protocol tests in test_mcp_protocol.py) ---
 
 
 class TestMCPToolRegistration:
@@ -354,25 +441,7 @@ class TestMCPToolRegistration:
         assert "prompt" in INPUT_SCHEMA.get("properties", {})
         assert "prompt" in INPUT_SCHEMA.get("required", [])
 
-    @pytest.mark.asyncio
-    async def test_call_tool_unknown(self):
-        from mcp_consensus.server import handle_call_tool
-        result = await handle_call_tool("nonexistent_tool", {})
-        assert "Unknown tool" in result[0].text
-
-    @pytest.mark.asyncio
-    async def test_call_tool_missing_prompt(self):
-        from mcp_consensus.server import handle_call_tool
-        result = await handle_call_tool("multi_ai_design", {})
-        assert "Invalid arguments" in result[0].text
-
-    @pytest.mark.asyncio
-    @respx.mock
-    async def test_call_tool_dry_run(self):
-        from mcp_consensus.server import handle_call_tool
-        result = await handle_call_tool(
-            "multi_ai_review",
-            {"prompt": "review this", "dry_run": True},
-        )
-        output = json.loads(result[0].text)
-        assert "DRY RUN" in output["synthesized_response"]
+    def test_handlers_registered(self):
+        from mcp_consensus.server import app
+        assert app.get_request_handler("tools/list") is not None
+        assert app.get_request_handler("tools/call") is not None

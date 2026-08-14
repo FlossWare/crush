@@ -5,7 +5,14 @@ import sys
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import TextContent, Tool
+from mcp.types import (
+    CallToolRequest,
+    CallToolResult,
+    ListToolsRequest,
+    ListToolsResult,
+    TextContent,
+    Tool,
+)
 
 from .consensus import run_consensus
 from .models import ConsensusRequest
@@ -47,21 +54,28 @@ VALID_TOOLS = {t.name for t in TOOLS}
 app = Server("mcp-consensus")
 
 
-@app.list_tools()
-async def handle_list_tools() -> list[Tool]:
-    return TOOLS
+async def _handle_list_tools(req: ListToolsRequest) -> ListToolsResult:
+    return ListToolsResult(tools=TOOLS)
 
 
-@app.call_tool()
-async def handle_call_tool(name: str, arguments: dict) -> list[TextContent]:
+async def _handle_call_tool(req: CallToolRequest) -> CallToolResult:
+    name = req.params.name
+    arguments = req.params.arguments or {}
+
     if name not in VALID_TOOLS:
-        return [TextContent(type="text", text=f"Unknown tool: {name}")]
+        return CallToolResult(
+            content=[TextContent(type="text", text=f"Unknown tool: {name}")],
+            is_error=True,
+        )
 
     try:
         request = ConsensusRequest(**arguments)
     except Exception as e:
         logger.warning("Invalid arguments for %s: %s", name, e)
-        return [TextContent(type="text", text="Invalid arguments: check required fields (prompt is required)")]
+        return CallToolResult(
+            content=[TextContent(type="text", text="Invalid arguments: check required fields (prompt is required)")],
+            is_error=True,
+        )
 
     logger.info(
         "Tool=%s workers=%s arbiter=%s dry_run=%s",
@@ -89,7 +103,13 @@ async def handle_call_tool(name: str, arguments: dict) -> list[TextContent]:
             for wr in result.raw_worker_responses
         ]
 
-    return [TextContent(type="text", text=json.dumps(output, indent=2))]
+    return CallToolResult(
+        content=[TextContent(type="text", text=json.dumps(output, indent=2))]
+    )
+
+
+app.add_request_handler("tools/list", ListToolsRequest, _handle_list_tools)
+app.add_request_handler("tools/call", CallToolRequest, _handle_call_tool)
 
 
 async def main():

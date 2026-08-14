@@ -53,7 +53,7 @@ Both transports share the same consensus engine (`consensus.py`).
 | `arbiter_model` | string | gemini-3.5-flash | Override the synthesis model |
 | `temperature` | float | 0.3 | Worker model temperature (0.0–1.0) |
 | `arbiter_temperature` | float | 0.3 | Arbiter synthesis temperature (0.0–1.0). Independent of worker temperature. |
-| `timeout_seconds` | int | 60 | Per-worker timeout in seconds (5–300) |
+| `timeout_seconds` | int | 60 | Total worker deadline in seconds (5–300). Covers all attempts including retries. |
 | `arbiter_timeout_seconds` | int | timeout_seconds | Arbiter timeout in seconds (5–600). Defaults to the worker timeout if not set. |
 | `dry_run` | bool | false | Return prompts without making any network calls |
 
@@ -165,6 +165,6 @@ Tests cover: dry-run, explicit/default worker selection, worker timeout, individ
 ## Error Handling
 
 - **Worker failures** are isolated — a failing worker doesn't affect others. Failed workers are reported in the response alongside successful ones.
-- **Transient errors** (5xx, timeouts, connection errors) are retried with exponential backoff. Client errors (4xx) fail immediately.
+- **Transient errors** (5xx, timeouts, connection errors) are retried with exponential backoff within the total worker deadline. Client errors (4xx) fail immediately without retry.
 - **Arbiter failure** falls back to returning raw worker responses concatenated, so worker output is never lost.
 - **All-workers-fail** returns a descriptive error with per-worker failure details.

@@ -42,7 +42,7 @@ class ConsensusRequest(BaseModel):
         default=60,
         ge=5,
         le=300,
-        description="Per-worker timeout in seconds.",
+        description="Total worker deadline in seconds. Covers all attempts including retries.",
     )
     arbiter_timeout_seconds: int | None = Field(
         default=None,

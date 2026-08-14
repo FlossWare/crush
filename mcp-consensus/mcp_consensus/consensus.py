@@ -98,12 +98,17 @@ async def call_worker(
 ) -> WorkerResponse | FailedWorker:
     messages = build_worker_prompt(tool_name, user_prompt)
     start = time.monotonic()
+    deadline = start + timeout_seconds
     last_error = None
     for attempt in range(1 + WORKER_RETRIES):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            last_error = last_error or asyncio.TimeoutError()
+            break
         try:
             response = await asyncio.wait_for(
                 _call_with_semaphore(semaphore, call_model(client, model, messages, temperature)),
-                timeout=timeout_seconds,
+                timeout=remaining,
             )
             latency = int((time.monotonic() - start) * 1000)
             logger.info("Worker %s succeeded (%dms)", model, latency)
@@ -114,31 +119,17 @@ async def call_worker(
                 logger.warning("Worker %s failed with non-retryable error: %s", model, e)
                 return FailedWorker(model=model, error=str(e))
             if attempt < WORKER_RETRIES:
-                delay = 2 ** attempt
+                delay = min(2 ** attempt, max(0, deadline - time.monotonic()))
+                if delay <= 0:
+                    break
                 logger.info(
-                    "Worker %s attempt %d failed (%s), retrying in %ds",
+                    "Worker %s attempt %d failed (%s), retrying in %.1fs",
                     model, attempt + 1, type(e).__name__, delay,
                 )
                 await asyncio.sleep(delay)
     logger.warning("Worker %s failed after %d attempts: %s", model, 1 + WORKER_RETRIES, last_error)
     return FailedWorker(model=model, error=str(last_error))
 
-
-async def query_available_models(client: httpx.AsyncClient) -> list[str]:
-    try:
-        headers = {}
-        if LITELLM_KEY:
-            headers["Authorization"] = f"Bearer {LITELLM_KEY}"
-        resp = await client.get(
-            f"{LITELLM_URL}/v1/models",
-            headers=headers,
-            timeout=10,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return sorted(set(m["id"] for m in data.get("data", [])))
-    except Exception:
-        return []
 
 
 def _resolve_workers(request: ConsensusRequest) -> list[str]:
