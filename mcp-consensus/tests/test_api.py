@@ -5,6 +5,7 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
+import mcp_consensus.api as api_module
 from mcp_consensus.api import app
 
 
@@ -32,6 +33,7 @@ class TestHealthEndpoint:
         data = resp.json()
         assert data["status"] == "healthy"
         assert data["litellm"] == "connected"
+        assert "auth_required" in data
 
     @respx.mock
     def test_degraded(self, client):
@@ -59,10 +61,12 @@ class TestModelsEndpoint:
         assert data["count"] == 2
 
     @respx.mock
-    def test_litellm_unavailable(self, client):
+    def test_litellm_unavailable_sanitized(self, client):
         respx.get(MODELS_URL).mock(side_effect=httpx.ConnectError("refused"))
         resp = client.get("/v1/models")
         assert resp.status_code == 502
+        assert resp.json()["detail"] == "LiteLLM unavailable"
+        assert "refused" not in resp.text
 
 
 class TestConsensusEndpoint:
@@ -145,11 +149,57 @@ class TestConsensusEndpoint:
         assert temperatures[1] == 0.2
 
 
+class TestAPIKeyAuth:
+    def test_no_key_configured_allows_requests(self, client, monkeypatch):
+        monkeypatch.setattr(api_module, "API_KEY", "")
+        resp = client.post("/v1/consensus", json={
+            "prompt": "x",
+            "dry_run": True,
+            "tool": "design",
+        })
+        assert resp.status_code == 200
+
+    def test_missing_key_rejected_when_configured(self, client, monkeypatch):
+        monkeypatch.setattr(api_module, "API_KEY", "secret-test-key")
+        resp = client.post("/v1/consensus", json={
+            "prompt": "x",
+            "dry_run": True,
+            "tool": "design",
+        })
+        assert resp.status_code == 401
+        assert resp.json()["detail"] == "Unauthorized"
+
+    def test_x_api_key_accepted(self, client, monkeypatch):
+        monkeypatch.setattr(api_module, "API_KEY", "secret-test-key")
+        resp = client.post(
+            "/v1/consensus",
+            json={"prompt": "x", "dry_run": True, "tool": "design"},
+            headers={"X-API-Key": "secret-test-key"},
+        )
+        assert resp.status_code == 200
+
+    def test_bearer_accepted(self, client, monkeypatch):
+        monkeypatch.setattr(api_module, "API_KEY", "secret-test-key")
+        resp = client.get(
+            "/v1/models",
+            headers={"Authorization": "Bearer secret-test-key"},
+        )
+        # May be 502 if LiteLLM mocked unavailable — auth itself must pass.
+        assert resp.status_code != 401
+
+    def test_health_remains_open(self, client, monkeypatch):
+        monkeypatch.setattr(api_module, "API_KEY", "secret-test-key")
+        with respx.mock:
+            respx.get(HEALTH_URL).respond(200)
+            resp = client.get("/health")
+        assert resp.status_code == 200
+
+
 class TestAPIDefaults:
     def test_binds_localhost_by_default(self):
-        import os
-        os.environ.pop("API_HOST", None)
-        from mcp_consensus.api import main
         import inspect
+
+        from mcp_consensus.api import main
+
         source = inspect.getsource(main)
         assert "127.0.0.1" in source
